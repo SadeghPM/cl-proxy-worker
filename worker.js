@@ -7,6 +7,27 @@ addEventListener('fetch', event => {
     event.respondWith(handleRequest(event.request));
   });
   
+  /**
+   * Ensures URL has a proper protocol by adding https:// if needed
+   * @param {string} url - The URL to correct
+   * @returns {string} - The corrected URL with proper protocol
+   */
+  function correctUrlProtocol(url) {
+    if (!url) return url;
+    
+    // Check if URL already has a valid protocol (http:// or https://)
+    const hasValidProtocol = /^https?:\/\//i.test(url);
+    
+    // If no valid protocol is found, add https://
+    if (!hasValidProtocol) {
+      // Remove any partial/malformed protocol if present
+      const cleanUrl = url.replace(/^[a-z]+:?\/?\/*/i, '');
+      return `https://${cleanUrl}`;
+    }
+    
+    return url;
+  }
+  
   async function handleRequest(request) {
     const url = new URL(request.url);
     const workerUrl = url.origin; // Get the worker's URL
@@ -14,15 +35,18 @@ addEventListener('fetch', event => {
     // Extract the target URL from the path
     const targetUrl = url.pathname.slice(1); // Remove the leading "/" from the path
   
+    // Correct the URL protocol if needed
+    const formattedUrl = correctUrlProtocol(targetUrl);
+  
     // Validate the target URL to ensure it's a valid URL
     try {
-        new URL(targetUrl); // URL validation
+        new URL(formattedUrl); // URL validation
     } catch (e) {
         return new Response('Provide Valid URL.', { status: 400 });
     }
   
     // Clone the incoming request and prepare it for the target URL
-    const modifiedRequest = new Request(targetUrl + url.search, {
+    const modifiedRequest = new Request(formattedUrl + url.search, {
         method: request.method,
         headers: request.headers,
         body: request.body,
