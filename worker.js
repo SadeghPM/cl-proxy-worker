@@ -9,52 +9,75 @@ addEventListener('fetch', event => {
   
   async function handleRequest(request) {
     const url = new URL(request.url);
-    const workerUrl = url.origin; // Get the worker's URL
-  
-    // Extract the target URL from the path
-    const targetUrl = url.pathname.slice(1); // Remove the leading "/" from the path
-  
-    // Validate the target URL to ensure it's a valid URL
+    const workerUrl = url.origin;
+    const targetUrl = url.pathname.slice(1);
+
     try {
-        new URL(targetUrl); // URL validation
+        new URL(targetUrl);
     } catch (e) {
         return new Response('Provide Valid URL.', { status: 400 });
     }
-  
-    // Clone the incoming request and prepare it for the target URL
+
+    // Create new headers without cookies
+    const requestHeaders = new Headers();
+    // Copy all headers except cookie
+    for (const [key, value] of request.headers.entries()) {
+        if (key.toLowerCase() !== 'cookie') {
+            requestHeaders.set(key, value);
+        }
+    }
+
     const modifiedRequest = new Request(targetUrl + url.search, {
         method: request.method,
-        headers: request.headers,
+        headers: requestHeaders,
         body: request.body,
         redirect: 'follow',
     });
-  
+
     try {
-        // Fetch the target URL
         const response = await fetch(modifiedRequest);
         
-        // Check if this is a GET request and the response is HTML
-        if (request.method === 'GET' && response.headers.get('content-type')?.includes('text/html')) {
-            // Clone the response and get its text
+        // Create new response headers without cookies
+        const responseHeaders = new Headers();
+        // Copy all headers except set-cookie
+        for (const [key, value] of response.headers.entries()) {
+            if (key.toLowerCase() !== 'set-cookie') {
+                responseHeaders.set(key, value);
+            }
+        }
+
+        const contentType = response.headers.get('content-type');
+        
+        // Handle HTML responses
+        if (request.method === 'GET' && contentType?.includes('text/html')) {
             const clonedResponse = response.clone();
             const text = await clonedResponse.text();
-            
-            // Rewrite links in the HTML
             const modifiedHtml = rewriteLinks(text, workerUrl, targetUrl);
             
-            // Return the modified HTML
             return new Response(modifiedHtml, {
                 status: response.status,
                 statusText: response.statusText,
-                headers: response.headers,
+                headers: responseHeaders,
             });
         }
-  
-        // For non-HTML responses or non-GET requests, return the original response
+        
+        // Handle CSS responses
+        if (request.method === 'GET' && contentType?.includes('text/css')) {
+            const clonedResponse = response.clone();
+            const cssText = await clonedResponse.text();
+            const modifiedCss = rewriteCssUrls(cssText, workerUrl, targetUrl);
+            
+            return new Response(modifiedCss, {
+                status: response.status,
+                statusText: response.statusText,
+                headers: responseHeaders,
+            });
+        }
+
         return new Response(response.body, {
             status: response.status,
             statusText: response.statusText,
-            headers: response.headers,
+            headers: responseHeaders,
         });
     } catch (error) {
         return new Response('Error fetching the target URL.', { status: 500 });
@@ -182,4 +205,52 @@ addEventListener('fetch', event => {
     });
     
     return html;
+  }
+
+  /**
+   * Rewrites URLs within CSS content
+   * @param {string} css - The CSS content
+   * @param {string} workerUrl - The worker's URL
+   * @param {string} targetUrl - The original target URL being proxied
+   * @returns {string} - The modified CSS with rewritten URLs
+   */
+  function rewriteCssUrls(css, workerUrl, targetUrl) {
+    const targetUrlObj = new URL(targetUrl);
+    const targetOrigin = targetUrlObj.origin;
+
+    // Handle @import rules
+    css = css.replace(
+        /@import\s+(?:url\(['"]?|['"])(https?:\/\/[^'"\)]+)['"\)]?/gi,
+        (match, url) => `@import "${workerUrl}/${url}"`
+    );
+
+    // Handle relative @import rules
+    css = css.replace(
+        /@import\s+(?:url\(['"]?|['"])(?!https?:\/\/)([^'"\)]+)['"\)]?/gi,
+        (match, path) => {
+            const absolutePath = path.startsWith('/') 
+                ? `${targetOrigin}${path}` 
+                : `${targetOrigin}/${path}`;
+            return `@import "${workerUrl}/${absolutePath}"`;
+        }
+    );
+
+    // Handle absolute URLs in url()
+    css = css.replace(
+        /url\(['"]?(https?:\/\/[^'"\)]+)['"]?\)/gi,
+        (match, url) => `url("${workerUrl}/${url}")`
+    );
+
+    // Handle relative URLs in url()
+    css = css.replace(
+        /url\(['"]?(?!data:|https?:\/\/)([^'"\)]+)['"]?\)/gi,
+        (match, path) => {
+            const absolutePath = path.startsWith('/') 
+                ? `${targetOrigin}${path}` 
+                : `${targetOrigin}/${path}`;
+            return `url("${workerUrl}/${absolutePath}")`;
+        }
+    );
+
+    return css;
   }
