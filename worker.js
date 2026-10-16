@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker for Proxying websites through Browser
+ * Cloudflare Worker for browsing websites through a proxy
  * Author: SadeghPM based on SeRaMo work ( https://github.com/seramo/ )
  */
 
