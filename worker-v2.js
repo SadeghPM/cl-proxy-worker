@@ -85,6 +85,9 @@ const JAR_COOKIE = '__p_jar';
 // via document.cookie) live here, so the shim can read/write them synchronously
 // while HttpOnly cookies stay hidden from page scripts.
 const JS_COOKIE = '__pjs';
+// Remembers the most recently proxied target, used as a fallback when a request
+// arrives without the target prefix (e.g. location.href = '/x' from page JS).
+const LAST_COOKIE = '__p_last';
 const JAR_CHUNK_SIZE = 3500; // encoded chars per cookie value (browser cap ~4KB)
 const JAR_MAX_CHUNKS = 12;
 const JAR_MAX_AGE = 31536000; // 1 year, refreshed on every change
@@ -335,17 +338,23 @@ async function handleRequest(request) {
   }
 
   // --- resolve + validate the target -------------------------------------
-  let targetUrl;
-  try {
-    targetUrl = new URL(rawTarget);
-    if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
-      throw new Error('unsupported protocol');
+  const targetUrl = absoluteTarget(rawTarget, url.search);
+
+  // The path is not an absolute URL. That means the page (or its JS) built a
+  // URL without the proxy prefix, e.g. `location.href = '/faq'`, a root-relative
+  // `fetch('/api')`, or a hard-coded path. Reconstruct the intended target from
+  // the referer (our own proxied URL) or the last-known target, then bounce the
+  // browser to the correctly-prefixed URL so everything stays inside the proxy.
+  if (!targetUrl) {
+    const base =
+      refererTarget(request.headers.get('referer'), workerUrl) ||
+      readLastTarget(request.headers.get('cookie'));
+    if (base) {
+      const resolved = resolveAgainst(base, rawTarget + url.search);
+      if (resolved) return redirectTo(`${workerUrl}/${resolved}`, 307);
     }
-  } catch (e) {
     return errorPage('Provide a valid http(s) URL.', 400);
   }
-  // The target's own query string arrives as the worker's query string.
-  if (url.search) targetUrl.search = url.search;
   const targetHref = targetUrl.href;
 
   // --- build the outgoing request ----------------------------------------
@@ -401,6 +410,11 @@ async function handleRequest(request) {
     writeJar(responseHeaders, jar, chunkCounts, workerUrl);
   }
 
+  // Remember this target so un-prefixed URLs can be resolved later.
+  if (readLastTarget(request.headers.get('cookie')) !== targetHref) {
+    appendLastTarget(responseHeaders, targetHref, workerUrl);
+  }
+
   // --- redirects: rewrite Location back into the proxy --------------------
   if (response.status >= 300 && response.status < 400) {
     const location = response.headers.get('location');
@@ -447,6 +461,68 @@ async function handleRequest(request) {
     statusText: response.statusText,
     headers: responseHeaders,
   });
+}
+
+/**
+ * Parse `rawTarget` (the path after the worker origin) as an absolute http(s)
+ * URL, applying the worker's query string. Returns null when it isn't one.
+ */
+function absoluteTarget(rawTarget, search) {
+  try {
+    const u = new URL(rawTarget);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    if (search) u.search = search;
+    return u;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Resolve `relative` against a base target URL, returning an absolute http(s)
+// href or null.
+function resolveAgainst(base, relative) {
+  try {
+    const u = new URL(relative, base);
+    if (u.protocol === 'http:' || u.protocol === 'https:') return u.href;
+  } catch (e) {}
+  return null;
+}
+
+// Extract the target from a referer that points at one of our proxied URLs.
+function refererTarget(referer, workerUrl) {
+  if (!referer) return null;
+  const prefix = `${workerUrl}/`;
+  const idx = referer.indexOf(prefix);
+  if (idx < 0) return null;
+  return resolveAgainst(workerUrl, referer.slice(idx + prefix.length));
+}
+
+function readLastTarget(cookieHeader) {
+  if (!cookieHeader) return null;
+  for (const pair of cookieHeader.split(';')) {
+    const i = pair.indexOf('=');
+    if (i < 0) continue;
+    if (pair.slice(0, i).trim() === LAST_COOKIE) {
+      try {
+        return decodeURIComponent(pair.slice(i + 1).trim()) || null;
+      } catch (e) {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function appendLastTarget(headers, targetHref, workerUrl) {
+  const secure = workerUrl.startsWith('https:') ? '; Secure' : '';
+  headers.append(
+    'Set-Cookie',
+    `${LAST_COOKIE}=${encodeURIComponent(targetHref)}; Max-Age=${JAR_MAX_AGE}; SameSite=Lax; Path=/${secure}`
+  );
+}
+
+function redirectTo(location, status) {
+  return new Response(null, { status, headers: { location } });
 }
 
 /**
@@ -712,6 +788,21 @@ function proxyRuntime(WORKER, TARGET) {
   patchProperty(window.HTMLAnchorElement, 'href');
   patchProperty(window.HTMLAreaElement, 'href');
   patchProperty(window.HTMLFormElement, 'action');
+
+  // Catch dynamic attribute writes too (el.setAttribute('src', '/x')).
+  var URL_ATTRS = {
+    href: 1, src: 1, action: 1, formaction: 1, poster: 1, background: 1,
+    cite: 1, longdesc: 1, manifest: 1, 'data-src': 1, 'data-href': 1,
+  };
+  if (window.Element && Element.prototype.setAttribute) {
+    var nativeSetAttribute = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (name, value) {
+      if (value != null && URL_ATTRS[String(name).toLowerCase()]) {
+        value = proxify(value);
+      }
+      return nativeSetAttribute.call(this, name, value);
+    };
+  }
 
   // ---- document.cookie <-> JS-visible store ---------------------------
   var proto = window.Document && Document.prototype;
