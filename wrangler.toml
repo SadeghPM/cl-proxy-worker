@@ -1,8 +1,16 @@
-# Change `name` to your existing Worker's name if it differs, so
-# `wrangler deploy` updates it instead of creating a new Worker.
-name = "cl-proxy-worker"
+# Deploy with: npm run deploy  (wrangler deploy)
+name = "proxy"
 main = "worker-v2.js"
 compatibility_date = "2025-01-01"
+
+# Keeps the existing custom domain attached when deploying from the CLI.
+# If you ever deploy to workers.dev only, remove this block.
+routes = [
+  { pattern = "px.sadeghpm.ir", custom_domain = true }
+]
+
+[observability]
+enabled = true
 
 [vars]
 # Comma-separated host lists. Empty/omitted = allow all (deny still wins).

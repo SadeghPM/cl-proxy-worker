@@ -4,8 +4,11 @@
   "private": true,
   "description": "Browse websites through a Cloudflare Worker proxy",
   "scripts": {
+    "login": "wrangler login",
+    "whoami": "wrangler whoami",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "dry-run": "wrangler deploy --dry-run --outdir=.wrangler/dry-run",
     "test": "node test/run.js"
   },
   "devDependencies": {

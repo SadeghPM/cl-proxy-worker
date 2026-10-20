@@ -55,21 +55,42 @@ FETCH_TIMEOUT_MS = "30000"
 
 ## Deployment
 
-A `wrangler.toml` is included with `main = "worker-v2.js"`. If your existing Worker has a different name, update `name` so `wrangler deploy` updates it instead of creating a new one.
+`wrangler.toml` is already configured for this project:
+
+- `name = "proxy"` — your existing Worker.
+- `main = "worker-v2.js"`.
+- `routes = [{ pattern = "px.sadeghpm.ir", custom_domain = true }]` — keeps the custom domain attached on every deploy.
+
+One-time login (opens a browser):
 
 ```sh
 npm install
-npm run deploy          # wrangler deploy
+npm run login            # wrangler login
+npm run whoami           # confirm the account
 ```
 
-Attach a route or custom domain (e.g. `px.example.com/*`) in the Cloudflare dashboard, or use the generated `workers.dev` URL.
+Then deploy:
+
+```sh
+npm run deploy           # wrangler deploy
+npm run dry-run          # optional: bundle without deploying
+```
+
+If the custom domain is managed elsewhere or deploy complains about the route, remove the `routes` block from `wrangler.toml`; the existing dashboard route stays attached.
 
 Confirm which build is live:
 
 ```sh
-curl -s https://px.example.com/__proxy/health
+curl -s https://px.sadeghpm.ir/__proxy/health
 # {"ok":true,"version":"2.1.0", ...}
 ```
+
+### CI / API token
+
+Instead of OAuth, set `CLOUDFLARE_API_TOKEN` (and optionally `CLOUDFLARE_ACCOUNT_ID`). The token needs:
+
+- **Account → Workers Scripts → Edit**
+- **Zone → Workers Routes → Edit** and **Zone → Zone → Read** (for the custom domain route on `sadeghpm.ir`)
 
 ## How it works
 
