@@ -470,6 +470,11 @@ async function handleRequest(request) {
     requestHeaders.set('referer', idx === 0 ? referer.slice(workerUrl.length + 1) : referer);
   }
 
+  // --- WebSocket upgrade: pipe it straight through ----------------------
+  if ((request.headers.get('upgrade') || '').toLowerCase() === 'websocket') {
+    return handleWebSocket(targetUrl, requestHeaders);
+  }
+
   const init = {
     method: request.method,
     headers: requestHeaders,
@@ -615,6 +620,74 @@ function appendLastTarget(headers, targetHref, workerUrl) {
 
 function redirectTo(location, status) {
   return new Response(null, { status, headers: { location } });
+}
+
+/**
+ * Proxy a WebSocket upgrade. The target URL is an http(s) URL; Cloudflare
+ * performs the ws(s) handshake and exposes the upstream socket on
+ * `response.webSocket`.
+ */
+async function handleWebSocket(targetUrl, headers) {
+  // Let the runtime generate the handshake headers (Sec-WebSocket-Key,
+  // Sec-WebSocket-Version, ...). Forwarding the browser's key would make the
+  // upstream handshake fail, so only carry over application-level headers.
+  const wsHeaders = new Headers();
+  for (const name of [
+    'cookie',
+    'origin',
+    'referer',
+    'user-agent',
+    'accept-language',
+    'sec-websocket-protocol',
+  ]) {
+    const value = headers.get(name);
+    if (value) wsHeaders.set(name, value);
+  }
+  wsHeaders.set('upgrade', 'websocket');
+
+  let upstream;
+  try {
+    upstream = await fetch(targetUrl.href, { headers: wsHeaders, method: 'GET' });
+  } catch (e) {
+    return errorPage('WebSocket proxy error.', 502);
+  }
+
+  const upstreamWs = upstream.webSocket;
+  if (!upstreamWs) {
+    return errorPage('The target refused the WebSocket upgrade.', 502);
+  }
+
+  const [client, server] = Object.values(new WebSocketPair());
+  upstreamWs.accept();
+  server.accept();
+
+  const closeQuietly = (socket, code, reason) => {
+    try {
+      socket.close(code, reason);
+    } catch (e) {}
+  };
+
+  upstreamWs.addEventListener('message', event => {
+    try {
+      server.send(event.data);
+    } catch (e) {}
+  });
+  upstreamWs.addEventListener('close', event => {
+    closeQuietly(server, event.code, event.reason);
+  });
+  upstreamWs.addEventListener('error', () => {
+    closeQuietly(server, 1011, 'upstream error');
+  });
+  server.addEventListener('message', event => {
+    try {
+      upstreamWs.send(event.data);
+    } catch (e) {}
+  });
+  server.addEventListener('close', event => {
+    closeQuietly(upstreamWs, event.code, event.reason);
+  });
+
+  return new Response(null, { status: 101, webSocket: client });
 }
 
 /**
@@ -851,6 +924,54 @@ function proxyRuntime(WORKER, TARGET) {
     navigator.sendBeacon = function (url, data) {
       return nativeBeacon(proxify(url), data);
     };
+  }
+
+  // ---- WebSocket / EventSource ---------------------------------------
+  var WS_BASE = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/';
+
+  function proxifyWs(value) {
+    var abs;
+    try {
+      abs = new URL(String(value), VIRTUAL);
+    } catch (e) {
+      return value;
+    }
+    var proto = abs.protocol;
+    if (proto === 'ws:') proto = 'http:';
+    else if (proto === 'wss:') proto = 'https:';
+    if (proto !== 'http:' && proto !== 'https:') return value;
+    abs.protocol = proto;
+    return WS_BASE + abs.href;
+  }
+
+  if (window.WebSocket) {
+    var NativeWebSocket = window.WebSocket;
+    var PatchedWebSocket = function (url, protocols) {
+      var target = proxifyWs(url);
+      return protocols === undefined
+        ? new NativeWebSocket(target)
+        : new NativeWebSocket(target, protocols);
+    };
+    PatchedWebSocket.prototype = NativeWebSocket.prototype;
+    ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(function (k) {
+      PatchedWebSocket[k] = NativeWebSocket[k];
+    });
+    window.WebSocket = PatchedWebSocket;
+  }
+
+  if (window.EventSource) {
+    var NativeEventSource = window.EventSource;
+    var PatchedEventSource = function (url, config) {
+      var target = proxify(url);
+      return config === undefined
+        ? new NativeEventSource(target)
+        : new NativeEventSource(target, config);
+    };
+    PatchedEventSource.prototype = NativeEventSource.prototype;
+    ['CONNECTING', 'OPEN', 'CLOSED'].forEach(function (k) {
+      PatchedEventSource[k] = NativeEventSource[k];
+    });
+    window.EventSource = PatchedEventSource;
   }
 
   // ---- URL-reflecting element properties ------------------------------
