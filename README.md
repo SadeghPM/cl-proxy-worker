@@ -1,61 +1,96 @@
 # Cloudflare Worker Proxy
 
-A lightweight, efficient proxy service built on Cloudflare Workers that allows browsing websites through a proxy.
+A proxy for browsing websites through a Cloudflare Worker.
 
-## Overview
+There are two implementations in this repo:
 
-This project provides a Cloudflare Worker that acts as a proxy for web content. It allows users to access websites through the worker, which can be useful for:
+- **`worker-v2.js`** — current, recommended implementation (streaming, cookie jar, JS shim, security guards).
+- **`worker.js`** — the original simple version, kept for reference.
 
-- Bypassing certain geographic restrictions
-- Accessing content through Cloudflare's network
-- Simple web scraping scenarios
-- Testing websites from different network locations
+## Features (v2)
 
-## How It Works
-
-The worker intercepts requests to its URL and forwards them to the target website. When the target website responds, the worker:
-
-1. Captures the response
-2. For HTML content, rewrites all links (both absolute and relative) to route through the proxy
-3. Returns the modified content to the user
-
-This creates a seamless browsing experience where all subsequent navigation continues through the proxy.
-
-## Features
-
-- Proxies all HTTP methods (GET, POST, etc.)
-- Rewrites links in HTML content to maintain proxy functionality
-- Handles various URL types:
-  - Absolute URLs (http://, https://)
-  - Relative URLs
-  - URLs in various HTML attributes (href, src, action, srcset, etc.)
-  - URLs in CSS (both inline and in style tags)
-- Preserves original headers and status codes
+- **Streaming HTML rewriting** with Cloudflare's native `HTMLRewriter` (single pass, no whole-document buffering).
+- **Correct URL rewriting**: absolute, root-relative, relative (`../`, `./`), protocol-relative (`//host/x`), `<base href>`, `srcset`/`imagesrcset`, inline `style`, `<style>` blocks, `url()`/`@import` in CSS, `<meta http-equiv="refresh">`.
+- **SRI-safe**: strips `integrity`/`crossorigin` on rewritten tags so scripts/styles are not blocked.
+- **Header hygiene**: strips hop-by-hop and origin-assuming headers (`content-length`, `content-encoding`, CSP, `X-Frame-Options`, HSTS, COOP/COEP/CORP, …); maps `Origin`/`Referer` back to the target.
+- **Redirects**: fetched with `redirect: "manual"`, `Location` rewritten into the proxy.
+- **Per-host cookie jar**: upstream `Set-Cookie` is stored on the worker origin, split into an `HttpOnly` store and a JS-visible store, matched by domain/path/`Secure`, and isolated per target site.
+- **Runtime shim**: injected before page scripts; patches `fetch`, `XMLHttpRequest`, `history.pushState/replaceState`, `location.assign/replace`, `window.open`, `sendBeacon`, URL-reflecting element properties, `Element.prototype.setAttribute`, and `document.cookie`.
+- **Un-prefixed URL fallback**: if the page (or its JS) navigates to a URL without the proxy prefix, the worker reconstructs the target from the `Referer` or a `__p_last` cookie and redirects into the proxy.
+- **Safety**: blocks localhost/private/link-local/cloud-metadata targets by default, optional allow/deny host lists, and a configurable upstream fetch timeout.
+- Minimal landing page and readable error pages.
 
 ## Usage
 
-To use this proxy, deploy it to Cloudflare Workers and access it with the following URL format:
-
 ```
-https://your-worker-domain.workers.dev/https://example.com
+https://your-worker-domain/https://example.com
 ```
 
-Where:
-- `your-worker-domain.workers.dev` is your Cloudflare Worker's domain
-- `https://example.com` is the target website you want to access through the proxy
+The target must be an absolute `http(s)` URL. Query strings work as expected:
+
+```
+https://your-worker-domain/https://example.com/search?q=hello
+```
+
+## Configuration
+
+Set these as Worker variables (e.g. under `[vars]` in `wrangler.toml`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `ALLOWED_HOSTS` | _(empty = allow all)_ | Comma-separated hosts; subdomains match automatically. `*.example.com` is also accepted. |
+| `DENIED_HOSTS` | _(empty)_ | Comma-separated hosts to block (subdomains included). Takes precedence. |
+| `BLOCK_PRIVATE_IPS` | `true` | Blocks `localhost`, RFC1918, link-local/cloud metadata (`169.254.0.0/16`), CGNAT, multicast, and private IPv6. Set to `false` to disable. |
+| `FETCH_TIMEOUT_MS` | `30000` | Upstream fetch timeout in milliseconds. |
+
+Example:
+
+```toml
+[vars]
+ALLOWED_HOSTS = "telegram.org,*.github.com,core.telegram.org"
+DENIED_HOSTS  = "facebook.com"
+FETCH_TIMEOUT_MS = "30000"
+```
 
 ## Deployment
 
-1. Set up a Cloudflare Workers account
-2. Deploy the worker.js file to your Cloudflare Workers environment
-3. Access websites through your worker's URL as described in the Usage section
+`wrangler.toml`:
+
+```toml
+name = "cl-proxy"
+main = "worker-v2.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+# ALLOWED_HOSTS = "example.com"
+```
+
+Then:
+
+```sh
+npx wrangler deploy
+```
+
+Attach a route or custom domain (e.g. `px.example.com/*`) in the Cloudflare dashboard, or use the generated `workers.dev` URL.
+
+## How it works
+
+1. The request path after the worker origin is the target URL. The target's query string is carried as the worker's query string.
+2. The worker fetches the target (`redirect: "manual"`, timeout, SSRF/allowlist checks).
+3. HTML is streamed through `HTMLRewriter`; URLs are resolved with `new URL(value, documentBase)` and prefixed with the worker origin. A small runtime shim is injected first.
+4. CSS is rewritten (`url()`, `@import`).
+5. `Set-Cookie` is merged into the per-host jar and re-emitted as worker-origin cookies.
+6. Redirects have their `Location` rewritten into the proxy.
 
 ## Limitations
 
-- Some websites with complex JavaScript may not work perfectly
-- Websites with strict Content Security Policy (CSP) might block proxied resources
-- The proxy does not handle WebSocket connections
+- **`location.href = '...'` cannot be intercepted** in browsers (the `location` object is unforgeable). The worker's Referer/`__p_last` fallback handles most of these, but a navigation with no referer and no prior target can still fail.
+- **WebSockets are not proxied.**
+- Cookies live in client-side cookies on the worker origin and are capped at roughly 42 KB; very cookie-heavy sites may overflow.
+- **DNS rebinding** cannot be fully prevented (Workers cannot resolve hostnames before fetching); the private-range checks cover literal IPs and known local names.
+- Some sites with aggressive bot protection may block Cloudflare Worker egress.
+- Sites that rely on reading `location.pathname` may behave oddly because the browser URL contains the proxied target path.
 
 ## Credits
 
-Created by SadeghPM, based on work by [SeRaMo](https://github.com/seramo/)
+Created by SadeghPM, based on work by [SeRaMo](https://github.com/seramo/).
