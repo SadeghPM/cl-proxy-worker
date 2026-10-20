@@ -326,6 +326,12 @@ eq('EventSource rewritten', es.url, `${WORKER}/https://example.com/events`);
   ok('WS accepts upstream', upstreamSocket.accepted === true);
   eq('WS returns 101', res.status, 101);
 
+  const health = await w.handleRequest(new Request(`${WORKER}/__proxy/health`));
+  eq('health status', health.status, 200);
+  const healthBody = await health.json();
+  eq('health version', healthBody.version, '2.1.0');
+  ok('health advertises websocket', healthBody.features.websocket === true);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

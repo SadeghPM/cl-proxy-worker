@@ -64,6 +64,13 @@ npm run deploy          # wrangler deploy
 
 Attach a route or custom domain (e.g. `px.example.com/*`) in the Cloudflare dashboard, or use the generated `workers.dev` URL.
 
+Confirm which build is live:
+
+```sh
+curl -s https://px.example.com/__proxy/health
+# {"ok":true,"version":"2.1.0", ...}
+```
+
 ## How it works
 
 1. The request path after the worker origin is the target URL. The target's query string is carried as the worker's query string.

@@ -30,9 +30,13 @@
  *    metadata ranges by default, optional ALLOWED_HOSTS / DENIED_HOSTS lists,
  *    and a configurable upstream fetch timeout.
  *
- * NOTE: Still intentionally out of scope here (see the review):
- *  - WebSocket proxying, host/subdomain based mapping, caching
+ * NOTE: Still intentionally out of scope here:
+ *  - Host/subdomain based mapping (needs wildcard DNS)
+ *  - Response caching (personalized pages make it risky to share)
  */
+
+// Bump this when deploying so /__proxy/health makes it obvious which build is live.
+const PROXY_VERSION = '2.1.0';
 
 // Response headers that must not be forwarded verbatim. Either they are managed
 // by the Workers runtime (length/encoding), or they assume the *real* origin and
@@ -410,6 +414,30 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const workerUrl = url.origin;
   const rawTarget = url.pathname.slice(1);
+
+  // A cheap way to confirm which build is actually deployed.
+  if (url.pathname === '/__proxy/health' || url.pathname === '/__proxy/version') {
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        version: PROXY_VERSION,
+        worker: workerUrl,
+        features: {
+          htmlRewriter: true,
+          cookieJar: true,
+          runtimeShim: true,
+          websocket: true,
+          ssrfGuard: true,
+        },
+      }),
+      {
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        },
+      }
+    );
+  }
 
   if (!rawTarget) {
     return landingPage(workerUrl);
