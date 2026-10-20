@@ -26,9 +26,12 @@
  *    location.assign/replace, window.open, sendBeacon, common URL-reflecting
  *    element properties, and document.cookie, so JS/SPA navigation keeps
  *    flowing through the proxy.
+ *  - Safety (step 5): SSRF guard that blocks localhost/private/link-local/
+ *    metadata ranges by default, optional ALLOWED_HOSTS / DENIED_HOSTS lists,
+ *    and a configurable upstream fetch timeout.
  *
  * NOTE: Still intentionally out of scope here (see the review):
- *  - WebSocket proxying, host/subdomain based mapping, caching, abuse controls
+ *  - WebSocket proxying, host/subdomain based mapping, caching
  */
 
 // Response headers that must not be forwarded verbatim. Either they are managed
@@ -75,6 +78,81 @@ const URL_ATTRIBUTES = [
 ];
 
 const SCHEME_PREFIX = /^(?:data:|blob:|javascript:|mailto:|tel:|sms:|about:|#|chrome:|view-source:)/i;
+
+// --- configuration --------------------------------------------------------
+// Bindings are optional; when unset the proxy stays open (like before) but
+// still blocks private/internal targets. Set them in wrangler.toml as
+// [vars] ALLOWED_HOSTS / DENIED_HOSTS / BLOCK_PRIVATE_IPS / FETCH_TIMEOUT_MS.
+const CONFIG = {
+  allow: parseHostList(globalThis.ALLOWED_HOSTS),
+  deny: parseHostList(globalThis.DENIED_HOSTS),
+  blockPrivate: globalThis.BLOCK_PRIVATE_IPS !== 'false',
+  timeoutMs: Number(globalThis.FETCH_TIMEOUT_MS) || 30000,
+};
+
+function parseHostList(value) {
+  if (!value) return [];
+  const raw = Array.isArray(value) ? value.join(',') : String(value);
+  return raw
+    .split(',')
+    .map(s => s.trim().toLowerCase().replace(/^\.+/, ''))
+    .filter(Boolean);
+}
+
+// An entry matches the host itself or any subdomain. `*.example.com` behaves
+// the same as `example.com` for suffix matching.
+function matchesHostList(host, list) {
+  for (const entry of list) {
+    const suffix = entry.startsWith('*.') ? entry.slice(2) : entry;
+    if (host === suffix || host.endsWith(`.${suffix}`)) return true;
+  }
+  return false;
+}
+
+function isPrivateHost(host) {
+  if (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.lan')
+  ) {
+    return true;
+  }
+
+  // IPv4 (WHATWG normalizes decimal/octal/hex forms to dotted decimal).
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const a = Number(v4[1]);
+    const b = Number(v4[2]);
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true; // link-local / cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    if (a >= 224) return true; // multicast / reserved
+    return false;
+  }
+
+  // IPv6 (hostname may arrive wrapped in brackets).
+  if (host.includes(':')) {
+    const h = host.replace(/^\[|\]$/g, '').toLowerCase();
+    if (h === '::1' || h === '::') return true;
+    if (h.startsWith('fc') || h.startsWith('fd')) return true; // fc00::/7
+    if (/^fe[89ab]/.test(h)) return true; // fe80::/10
+    if (h.startsWith('::ffff:')) return isPrivateHost(h.slice(7));
+    return false;
+  }
+
+  return false;
+}
+
+function isHostAllowed(host) {
+  if (matchesHostList(host, CONFIG.deny)) return false;
+  if (CONFIG.allow.length && !matchesHostList(host, CONFIG.allow)) return false;
+  if (CONFIG.blockPrivate && isPrivateHost(host)) return false;
+  return true;
+}
 
 // --- cookie jar -----------------------------------------------------------
 // The whole jar lives in HTTP-only cookie(s) on the worker origin. Each entry
@@ -357,6 +435,12 @@ async function handleRequest(request) {
   }
   const targetHref = targetUrl.href;
 
+  // --- abuse / SSRF guard -------------------------------------------------
+  const targetHost = targetUrl.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!isHostAllowed(targetHost)) {
+    return errorPage('This host is not allowed through the proxy.', 403);
+  }
+
   // --- build the outgoing request ----------------------------------------
   const requestHeaders = new Headers();
   for (const [key, value] of request.headers) {
@@ -396,10 +480,18 @@ async function handleRequest(request) {
   }
 
   let response;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CONFIG.timeoutMs);
   try {
-    response = await fetch(targetUrl.href, init);
+    response = await fetch(targetUrl.href, { ...init, signal: controller.signal });
   } catch (e) {
-    return errorPage('Error fetching the target URL.', 502);
+    const timedOut = e && (e.name === 'AbortError' || e.name === 'TimeoutError');
+    return errorPage(
+      timedOut ? 'The target took too long to respond.' : 'Error fetching the target URL.',
+      502
+    );
+  } finally {
+    clearTimeout(timer);
   }
 
   const responseHeaders = new Headers(response.headers);
