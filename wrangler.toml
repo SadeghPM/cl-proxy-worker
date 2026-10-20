@@ -1,0 +1,16 @@
+# Change `name` to your existing Worker's name if it differs, so
+# `wrangler deploy` updates it instead of creating a new Worker.
+name = "cl-proxy-worker"
+main = "worker-v2.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+# Comma-separated host lists. Empty/omitted = allow all (deny still wins).
+# ALLOWED_HOSTS = "telegram.org,*.github.com"
+# DENIED_HOSTS = "facebook.com"
+
+# Set to "false" to allow localhost/private targets (NOT recommended).
+# BLOCK_PRIVATE_IPS = "true"
+
+# Upstream fetch timeout in milliseconds.
+# FETCH_TIMEOUT_MS = "30000"

@@ -1,0 +1,14 @@
+{
+  "name": "cl-proxy-worker",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Browse websites through a Cloudflare Worker proxy",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node test/run.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
